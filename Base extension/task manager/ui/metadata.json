@@ -1,0 +1,5 @@
+{
+  "name": "CSV Project Master",
+  "description": "A comprehensive project management dashboard powered by a single CSV source. Features AI-driven insights via Gemini, data visualization, and seamless CSV editing.",
+  "requestFramePermissions": []
+}
