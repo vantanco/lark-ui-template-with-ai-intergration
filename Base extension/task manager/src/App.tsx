@@ -12,7 +12,8 @@ import {
   Target,
   Sparkles,
   RefreshCw,
-  Bug
+  Bug,
+  Plus
 } from 'lucide-react';
 
 import { Project, SortField, SortOrder, ViewMode } from './types';
@@ -21,6 +22,8 @@ import { analyzeProjects } from './services/geminiService';
 import { fetchProjects } from './services/projectService';
 import { fetchCurrentRecordSample } from '../ui_larksdk_bridge/fetchCurrentRecordSample';
 import { fetchProjectsFromBitable } from './services/bitableProjectService';
+import { subscribeRecordChanges } from '../ui_larksdk_bridge/templates/changeListener';
+import { addRecordByFieldNames } from '../ui_larksdk_bridge/templates/api';
 import ProjectStats from './components/ProjectStats';
 import ProjectList from './components/ProjectList';
 import ProjectBoard from './components/ProjectBoard';
@@ -52,6 +55,18 @@ function App() {
   const [debugData, setDebugData] = useState<any | null>(null);
   const [debugError, setDebugError] = useState<string | null>(null);
   const [isDebugLoading, setIsDebugLoading] = useState(false);
+  const [isCreateLoading, setIsCreateLoading] = useState(false);
+  const [showCreateModal, setShowCreateModal] = useState(false);
+  const [createForm, setCreateForm] = useState({
+    name: '',
+    status: 'Pending' as Project['status'],
+    priority: 'Medium' as Project['priority'],
+    owner: CURRENT_USER,
+    budget: '0',
+    startDate: new Date().toISOString().slice(0, 10),
+    dueDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10),
+    description: '',
+  });
   
   const [sortField, setSortField] = useState<SortField>('dueDate');
   const [sortOrder, setSortOrder] = useState<SortOrder>('asc');
@@ -228,6 +243,51 @@ function App() {
       });
   }, [projects, searchTerm, sortField, sortOrder, selectedOwner, selectedPriority, isMyFocus]);
 
+  useEffect(() => {
+    // Listen to realtime changes in Bitable and patch UI data
+    let unsubscribe: (() => void) | undefined;
+    (async () => {
+      try {
+        unsubscribe = subscribeRecordChanges({
+          onRecords: async () => {
+            try {
+              setIsDataLoading(true);
+              const latest = await fetchProjectsFromBitable();
+              setProjects(latest);
+              localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(latest));
+            } catch (err) {
+              console.warn('Realtime patch failed', err);
+            } finally {
+              setIsDataLoading(false);
+            }
+          },
+          onSchema: async () => {
+            try {
+              setIsDataLoading(true);
+              const latest = await fetchProjectsFromBitable();
+              setProjects(latest);
+              localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(latest));
+            } catch (err) {
+              console.warn('Schema change reload failed', err);
+            } finally {
+              setIsDataLoading(false);
+            }
+          },
+          onError: (err) => console.warn('Listener error', err),
+        });
+      } catch (err) {
+        console.warn('Subscribe change listener failed', err);
+      }
+    })();
+    return () => {
+      try {
+        unsubscribe && unsubscribe();
+      } catch {
+        /* ignore */
+      }
+    };
+  }, []);
+
   const handleDebugRecord = async () => {
     setIsDebugLoading(true);
     setDebugError(null);
@@ -239,6 +299,57 @@ function App() {
       setDebugData(null);
     } finally {
       setIsDebugLoading(false);
+    }
+  };
+
+  const handleCreateRecord = async () => {
+    setShowCreateModal(true);
+  };
+
+  const handleSubmitCreate = async () => {
+    if (!createForm.name.trim()) {
+      setDebugError('Tên record không được để trống');
+      return;
+    }
+    setIsCreateLoading(true);
+    setDebugError(null);
+    try {
+      const payload = {
+        id: Date.now().toString(),
+        name: createForm.name.trim(),
+        status: createForm.status,
+        priority: createForm.priority,
+        owner: createForm.owner.trim() || CURRENT_USER,
+        budget: Number(createForm.budget) || 0,
+        startDate: createForm.startDate,
+        dueDate: createForm.dueDate,
+        description: createForm.description,
+      };
+
+      const recordId = await addRecordByFieldNames(payload);
+      if (!recordId) {
+        setDebugError('Tạo record qua SDK không thành công.');
+        return;
+      }
+
+      try {
+        const latest = await fetchProjectsFromBitable();
+        setProjects(latest);
+        localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(latest));
+        setShowCreateModal(false);
+        setCreateForm((prev) => ({
+          ...prev,
+          name: '',
+          budget: '0',
+          description: '',
+        }));
+      } catch (err) {
+        console.warn('Reload after create failed', err);
+      }
+    } catch (err: any) {
+      setDebugError(err?.message || String(err));
+    } finally {
+      setIsCreateLoading(false);
     }
   };
 
@@ -292,6 +403,16 @@ function App() {
               >
                  <Target className="w-4 h-4" />
                  <span className="hidden sm:inline">My Focus</span>
+              </button>
+
+              <button
+                onClick={handleCreateRecord}
+                className={`flex items-center gap-2 px-3 py-2 rounded-xl text-sm font-medium transition-all ${isCreateLoading ? 'bg-indigo-50 text-indigo-600 border border-indigo-100' : 'bg-indigo-600 text-white shadow-lg shadow-indigo-500/30 hover:shadow-indigo-500/40'}`}
+                title="Tạo record mới trên Bitable"
+                disabled={isCreateLoading}
+              >
+                {isCreateLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
+                <span className="hidden sm:inline">New record</span>
               </button>
 
               <button
@@ -448,6 +569,115 @@ function App() {
                <Sidebar activeTab={activeTab} setActiveTab={(tab) => { setActiveTab(tab); setIsSidebarOpen(false); }} />
             </div>
          </div>
+      )}
+
+      {/* Modal tạo record */}
+      {showCreateModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+          <div className="absolute inset-0 bg-slate-900/50 backdrop-blur-sm" onClick={() => !isCreateLoading && setShowCreateModal(false)}></div>
+          <div className="relative bg-white w-full max-w-lg mx-4 rounded-2xl shadow-2xl border border-slate-200 p-6 space-y-4">
+            <h3 className="text-lg font-semibold text-slate-800 flex items-center gap-2">
+              <Plus className="w-5 h-5 text-indigo-600" /> Tạo record mới
+            </h3>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div className="col-span-1 sm:col-span-2">
+                <label className="text-sm text-slate-600">Tên</label>
+                <input
+                  className="w-full mt-1 px-3 py-2 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500/30"
+                  value={createForm.name}
+                  onChange={(e) => setCreateForm({ ...createForm, name: e.target.value })}
+                  placeholder="Nhập tên record"
+                />
+              </div>
+              <div>
+                <label className="text-sm text-slate-600">Trạng thái</label>
+                <select
+                  className="w-full mt-1 px-3 py-2 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500/30"
+                  value={createForm.status}
+                  onChange={(e) => setCreateForm({ ...createForm, status: e.target.value as Project['status'] })}
+                >
+                  <option>Pending</option>
+                  <option>In Progress</option>
+                  <option>Completed</option>
+                  <option>Blocked</option>
+                </select>
+              </div>
+              <div>
+                <label className="text-sm text-slate-600">Ưu tiên</label>
+                <select
+                  className="w-full mt-1 px-3 py-2 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500/30"
+                  value={createForm.priority}
+                  onChange={(e) => setCreateForm({ ...createForm, priority: e.target.value as Project['priority'] })}
+                >
+                  <option>Low</option>
+                  <option>Medium</option>
+                  <option>High</option>
+                  <option>Critical</option>
+                </select>
+              </div>
+              <div>
+                <label className="text-sm text-slate-600">Owner</label>
+                <input
+                  className="w-full mt-1 px-3 py-2 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500/30"
+                  value={createForm.owner}
+                  onChange={(e) => setCreateForm({ ...createForm, owner: e.target.value })}
+                />
+              </div>
+              <div>
+                <label className="text-sm text-slate-600">Budget</label>
+                <input
+                  type="number"
+                  className="w-full mt-1 px-3 py-2 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500/30"
+                  value={createForm.budget}
+                  onChange={(e) => setCreateForm({ ...createForm, budget: e.target.value })}
+                />
+              </div>
+              <div>
+                <label className="text-sm text-slate-600">Start date</label>
+                <input
+                  type="date"
+                  className="w-full mt-1 px-3 py-2 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500/30"
+                  value={createForm.startDate}
+                  onChange={(e) => setCreateForm({ ...createForm, startDate: e.target.value })}
+                />
+              </div>
+              <div>
+                <label className="text-sm text-slate-600">Due date</label>
+                <input
+                  type="date"
+                  className="w-full mt-1 px-3 py-2 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500/30"
+                  value={createForm.dueDate}
+                  onChange={(e) => setCreateForm({ ...createForm, dueDate: e.target.value })}
+                />
+              </div>
+              <div className="col-span-1 sm:col-span-2">
+                <label className="text-sm text-slate-600">Mô tả</label>
+                <textarea
+                  className="w-full mt-1 px-3 py-2 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500/30"
+                  rows={3}
+                  value={createForm.description}
+                  onChange={(e) => setCreateForm({ ...createForm, description: e.target.value })}
+                />
+              </div>
+            </div>
+            <div className="flex justify-end gap-3">
+              <button
+                onClick={() => !isCreateLoading && setShowCreateModal(false)}
+                className="px-4 py-2 rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50"
+                disabled={isCreateLoading}
+              >
+                Hủy
+              </button>
+              <button
+                onClick={handleSubmitCreate}
+                className="px-4 py-2 rounded-lg bg-indigo-600 text-white font-medium hover:bg-indigo-700 disabled:opacity-60"
+                disabled={isCreateLoading}
+              >
+                {isCreateLoading ? 'Đang tạo...' : 'Tạo record'}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );
